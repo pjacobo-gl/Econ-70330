@@ -1,0 +1,6 @@
+# Ignore all files in the data folder
+data/
+
+# Ignore any dta files anywhere
+*.dta
+
