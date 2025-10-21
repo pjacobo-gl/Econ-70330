@@ -1,0 +1,48 @@
+---
+title: "data_cleaning"
+format: html
+editor: visual
+---
+
+## Import and clean data
+
+```{r Import and clean data, #| echo: false}
+library(dplyr)
+library(haven)
+  
+# Take a look at the replication data
+data <- read_dta("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Information Rigidity and the Expectations Formation Process/Replication package/Replication_files/workfiles/us_data_updated.dta")
+
+fred_data <- read_dta("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Information Rigidity and the Expectations Formation Process/Replication package/Replication_files/Data/Macro-data---FRED.dta")
+```
+
+```{r}
+# Import SPF data
+PGDP <- read_excel("/Users/jacobogomezlandero/Downloads/meanLevel.xlsx", sheet = "PGDP")
+
+```
+
+```{r}
+# Filter to just inflation forecasts
+data_inf <- data %>%
+  filter(forvar=="pi")
+```
+
+```{r}
+# Inflation formula test
+test_pgdp <- PGDP %>%
+  filter(YEAR == 1981 & QUARTER == 3)
+#  %>%
+#  mutate(across(c(PGDP6, PGDP2), as.numeric)) %>%
+#  mutate(inf_forecast = 100*(log(PGDP6)-log(PGDP2)))
+
+test_pgdp <- test_pgdp %>%
+  mutate(across(starts_with("PGDP"), as.numeric)) %>%
+  mutate(pi_t3_t = 100 * (log(PGDP4) - log(PGDPA)))
+
+```
+
+```{r}
+test_authors <- data_inf %>%
+  filter(year == 1981, quarter == 3, fehor == 3)
+```

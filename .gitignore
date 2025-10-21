@@ -4,3 +4,4 @@ data/
 # Ignore any dta files anywhere
 *.dta
 
+.Rproj.user
