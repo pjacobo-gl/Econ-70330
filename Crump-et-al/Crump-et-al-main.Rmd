@@ -1,0 +1,181 @@
+---
+title: "Crump-et-al-main"
+output: html_document
+date: "2025-10-21"
+---
+
+```{r setup, echo=FALSE, warning=FALSE}
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Crump-et-al")
+library(readxl)
+library(dplyr)
+
+sce_13_16 <- read_excel("sce_13-16.xlsx", skip=1) # 2013-2016
+sce_17_19 <- read_excel("sce_17-19.xlsx",skip=1) # 2017-2019
+sce <- bind_rows(sce_13_16, sce_17_19) # bind
+sce <- sce %>%
+  filter(date >= 201306 & date <= 201907) # Sample period
+rm(sce_13_16, sce_17_19) # remove subsamples
+```
+
+```{r Fit inflation histogram into beta distribution}
+
+# lower and upper limits of bins (10 intervals)
+bin_lower <- c(12, 8, 4, 2, 0, -2, -4, -8, -12, -Inf)
+bin_upper <- c(Inf, 12, 8, 4, 2, 0, -2, -4, -8, -12)
+bin_vars <- paste0("Q9_bin", 1:10)
+
+# ---- Fitting helper ----
+fit_beta <- function(probs, lower, upper, minx=-12, maxx=12){
+  probs <- as.numeric(probs)/100
+  probs[is.na(probs) | probs < 0] <- 0
+  if(sum(probs)==0) return(rep(NA,4))
+  probs <- probs / sum(probs)
+  
+  mids <- (lower + upper)/2
+  finite_mids <- mids[is.finite(mids)]
+  mids[is.infinite(lower)] <- min(finite_mids)-2
+  mids[is.infinite(upper)] <- max(finite_mids)+2
+  
+  x <- rep(mids, pmax(1, round(probs*100)))
+  # rescale to [0,1]
+  x01 <- (x - minx)/(maxx - minx)
+  fit <- try(suppressWarnings(fitdist(x01, "beta", method="mle")), silent=TRUE)
+  if(inherits(fit,"try-error")) return(rep(NA,4))
+  
+  a <- fit$estimate["shape1"]
+  b <- fit$estimate["shape2"]
+  mean <- minx + (maxx - minx)*a/(a+b)
+  var  <- (maxx - minx)^2 * (a*b)/(((a+b)^2)*(a+b+1))
+  p1   <- minx + (maxx - minx)*qbeta(0.01, a, b)
+  p99  <- minx + (maxx - minx)*qbeta(0.99, a, b)
+  c(mean, var, p1, p99)
+}
+
+fit_one <- function(probs, lower, upper) {
+  probs <- as.numeric(probs)/100
+  probs[is.na(probs) | probs < 0] <- 0
+  if(sum(probs)==0) return(rep(NA,4))
+  probs <- probs / sum(probs)
+  nz <- which(probs>0)
+
+  ## Case 1: single bin → uniform
+  if(length(nz)==1){
+    a <- lower[nz]; b <- upper[nz]
+    m <- (a+b)/2; v <- (b-a)^2/12
+    q1 <- a + 0.01*(b-a); q99 <- a + 0.99*(b-a)
+    return(c(mean=m,var=v,p1=q1,p99=q99))
+  }
+
+  ## Case 2: two adjacent bins → triangular
+  if(length(nz)==2 && diff(nz)==1){
+    a <- lower[nz[1]]; b <- upper[nz[2]]
+    mode <- (a+b)/2
+    m <- (a+b+mode)/3
+    v <- (a^2 + b^2 + mode^2 - a*b - a*mode - b*mode)/18
+    q1 <- a + (b-a)*sqrt(0.01/2)
+    q99 <- b - (b-a)*sqrt(0.01/2)
+    return(c(mean=m,var=v,p1=q1,p99=q99))
+  }
+
+  # Case 3: 3+ bins → Beta (MLE via fitdistrplus)
+  res <- fit_beta(probs, lower, upper)
+  return(res)
+}
+
+# ---- Apply to main dataframe ----
+sce_fitted <- sce %>%
+  rowwise() %>%
+  mutate(stats = list(fit_one(c_across(all_of(bin_vars)), bin_lower, bin_upper))) %>%
+  ungroup() %>%
+  mutate(mean_infl = map_dbl(stats,1,.default=NA_real_),
+         var_infl  = map_dbl(stats,2,.default=NA_real_),
+         p1        = map_dbl(stats,3,.default=NA_real_),
+         p99       = map_dbl(stats,4,.default=NA_real_))
+
+# Trim inconsistent responses
+sce_trimmed <- sce_fitted %>%
+  filter(Q8v2part2 >= p1, Q8v2part2 <= p99)
+
+# Check trimming rate
+trim_rate <- 1 - nrow(sce_trimmed) / nrow(sce_fitted)
+cat("Share trimmed:", round(trim_rate*100, 2), "%")
+
+# Trim the top 5 % of variance from the fitted densities
+var_cutoff <- quantile(sce_trimmed$var_infl, 0.95, na.rm = TRUE)
+sce_trimmed <- sce_trimmed %>%
+  filter(var_infl <= var_cutoff)
+
+# Drop outliers in spending and income expectations
+sce_trimmed <- sce_trimmed %>%
+  filter(abs(Q25v2part2) <= 50) %>%                       # spending growth ≤ ±50 %
+  filter(Q25v2part2 <= 100 ,
+         Q25v2part2 >= -50,
+         Q26v2part2 <= 50)                  # income between 0.5× and 2×
+
+
+```
+
+
+```{r Variables}
+# Select variables
+
+# Basic variables
+#   Inflation point forecast (Q8v2part2)
+#   Expected Real Consumption Growth
+#     Point forecast of spending growth (Q26v2part2)
+#     Density-implied mean expected inflation (previously computed)
+#   Point forecast of Income Growth (Q25v2part2)
+
+# Control Variables: Demos
+# Age (Q32)
+# Married (Q38)*
+# Female (Q33)*
+# Hispanic (Q34)
+# Race (Q35)
+# Education (Q)
+demos <- c("Q32", "Q33", "Q38")
+
+# Control Variables: Het. Int. Rate
+#
+
+# Variables 
+basic_vars <- c("cluster", "weight", 
+                  "ExpSG", "ExpInfl", "ExpCG", 
+                  "RExpIncG", "PointInfl")
+sce_sub <- sce_trimmed %>%
+  dplyr::mutate(cluster = paste(date, userid, sep=""),
+         ExpInfl = mean_infl,
+         PointInfl = Q8v2part2,
+         ExpSG = Q26v2part2,
+         ExpIncG = Q25v2part2,
+         RExpIncG = ExpIncG - ExpInfl,
+         ExpCG = ExpSG - ExpInfl,
+         female = ) %>%
+  dplyr::select(basic_vars, )
+
+
+
+
+```
+```{r Table 3 Regressions}
+library(AER)
+library(sandwich)
+library(lmtest)
+
+# Weighted OLS
+ols_wt <- lm(ExpSG ~ ExpInfl + RExpIncG, data = sce_sub, weights = weight)
+ols_cl  <- coeftest(ols_wt, vcov = vcovCL(ols_wt, cluster = ~ cluster))
+
+# Weighted IV (2SLS)
+iv_wt <- ivreg(ExpSG ~ ExpInfl + RExpIncG | PointInfl + RExpIncG, 
+               data = sce_sub, weights = weight)
+iv_cl <- coeftest(iv_wt, vcov = vcovCL(iv_wt, cluster = ~ cluster))
+
+# Display results
+ols_cl
+iv_cl
+
+
+
+```
+

@@ -1,0 +1,95 @@
+---
+title: "test"
+output: html_document
+date: "2025-10-21"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(fitdistrplus)
+bin_lower <- c(12, 8, 4, 2, 0, -2, -4, -8, -12, -Inf)
+bin_upper <- c(Inf, 12, 8, 4, 2, 0, -2, -4, -8, -12)
+bin_vars <- paste0("Q9_bin", 1:10)
+
+# --- Update fit_one() to tag distribution type ---
+fit_one <- function(probs, lower, upper) {
+  probs <- as.numeric(probs)/100
+  probs[is.na(probs) | probs < 0] <- 0
+  if(sum(probs)==0) return(list(mean=NA,var=NA,p1=NA,p99=NA,type="none"))
+  probs <- probs / sum(probs)
+  nz <- which(probs>0)
+
+  ## Case 1: single bin → uniform
+  if(length(nz)==1){
+    a <- lower[nz]; b <- upper[nz]
+    m <- (a+b)/2; v <- (b-a)^2/12
+    q1 <- a + 0.01*(b-a); q99 <- a + 0.99*(b-a)
+    return(list(mean=m,var=v,p1=q1,p99=q99,type="uniform"))
+  }
+
+  ## Case 2: two adjacent bins → triangular
+  if(length(nz)==2 && diff(nz)==1){
+    a <- lower[nz[1]]; b <- upper[nz[2]]
+    mode <- (a+b)/2
+    m <- (a+b+mode)/3
+    v <- (a^2 + b^2 + mode^2 - a*b - a*mode - b*mode)/18
+    q1 <- a + (b-a)*sqrt(0.01/2)
+    q99 <- b - (b-a)*sqrt(0.01/2)
+    return(list(mean=m,var=v,p1=q1,p99=q99,type="triangular"))
+  }
+
+  # Case 3: 3+ bins → Beta (MLE)
+  res <- fit_beta(probs, lower, upper)
+  names(res) <- c("mean","var","p1","p99")
+  return(c(res, type="beta"))
+}
+
+# --- Your fitting pipeline with diagnostics ---
+sce_fitted <- sce %>%
+  rowwise() %>%
+  mutate(fit = list(fit_one(c_across(all_of(bin_vars)), bin_lower, bin_upper))) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    mean_infl = map_dbl(fit, "mean", .default = NA_real_),
+    var_infl  = map_dbl(fit, "var",  .default = NA_real_),
+    p1        = map_dbl(fit, "p1",   .default = NA_real_),
+    p99       = map_dbl(fit, "p99",  .default = NA_real_),
+    dist_type = map_chr(fit, "type", .default = "none")
+  ) %>%
+  dplyr::select(-fit)
+
+# --- (i) Count how many of each distribution were used ---
+cat("\nDistribution type counts:\n")
+print(table(sce_fitted$dist_type, useNA = "ifany"))
+
+# --- (ii) Sequential trimming diagnostics ---
+n0 <- nrow(sce_fitted)
+
+sce_trim1 <- sce_fitted %>% filter(Q8v2part2 >= p1, Q8v2part2 <= p99)
+n1 <- nrow(sce_trim1)
+cat("\nTrim 1: consistency check\nDropped:", n0 - n1, 
+    "(", round(100*(n0-n1)/n0,2),"%)\n")
+
+var_cutoff <- quantile(sce_trim1$var_infl, 0.95, na.rm = TRUE)
+sce_trim2 <- sce_trim1 %>% filter(var_infl <= var_cutoff)
+n2 <- nrow(sce_trim2)
+cat("Trim 2: top 5% variance\nDropped:", n1 - n2, 
+    "(", round(100*(n1-n2)/n0,2),"%)\n")
+
+sce_trim3 <- sce_trim2 %>%
+  filter(abs(Q25v2part2) <= 50) %>% 
+  filter(Q25v2part2 <= 100, Q25v2part2 >= -50, Q26v2part2 <= 50)
+n3 <- nrow(sce_trim3)
+cat("Trim 3: spending/income outliers\nDropped:", n2 - n3, 
+    "(", round(100*(n2-n3)/n0,2),"%)\n")
+
+cat("\nTotal remaining:", n3, "of", n0, 
+    "(", round(100*n3/n0,2),"%)\n")
+
+# Final trimmed dataset
+sce_trimmed <- sce_trim3
+
+
+```
+
