@@ -5,12 +5,12 @@ date: "2025-10-21"
 ---
 
 ```{r setup, echo=FALSE, warning=FALSE}
-setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Crump-et-al")
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330")
 library(readxl)
 library(dplyr)
 
-sce_13_16 <- read_excel("sce_13-16.xlsx", skip=1) # 2013-2016
-sce_17_19 <- read_excel("sce_17-19.xlsx",skip=1) # 2017-2019
+sce_13_16 <- read_excel("Data/sce_13-16.xlsx", skip=1) # 2013-2016
+sce_17_19 <- read_excel("Data/sce_17-19.xlsx",skip=1) # 2017-2019
 sce <- bind_rows(sce_13_16, sce_17_19) # bind
 sce <- sce %>%
   filter(date >= 201306 & date <= 201907) # Sample period
