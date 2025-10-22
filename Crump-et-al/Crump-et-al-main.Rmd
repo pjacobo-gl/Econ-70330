@@ -125,24 +125,27 @@ sce_trimmed <- sce_trimmed %>%
 #     Point forecast of spending growth (Q26v2part2)
 #     Density-implied mean expected inflation (previously computed)
 #   Point forecast of Income Growth (Q25v2part2)
-
-# Control Variables: Demos
-# Age (Q32)
-# Married (Q38)*
-# Female (Q33)*
-# Hispanic (Q34)
-# Race (Q35)
-# Education (Q)
-demos <- c("Q32", "Q33", "Q38")
-
-# Control Variables: Het. Int. Rate
-#
-
-# Variables 
 basic_vars <- c("cluster", "weight", 
                   "ExpSG", "ExpInfl", "ExpCG", 
                   "RExpIncG", "PointInfl")
-sce_sub <- sce_trimmed %>%
+
+# Control Variables: Demos
+# Age (Q32)
+# Married (Q38)
+# Female (Q33)
+# Hispanic (Q34)
+# Race (Q35_i)
+# Education (Q36)
+# Residence variables (Q45new) [include? It's mostly NAs]
+# Labor force status (HH2_i)
+# Multiple jobs (Q11) [== 1 if n > 1]
+demos <- c(
+  "age_cat", "female", "married", "hispanic", "multiple_jobs", "high_numeracy",
+  paste0("Q35_", 1:6),   # race dummies
+  paste0("HH2_", 1:11)   # labor-force status dummies
+)
+
+sce_trimmed_ext <- sce_trimmed %>%
   dplyr::mutate(cluster = paste(date, userid, sep=""),
          ExpInfl = mean_infl,
          PointInfl = Q8v2part2,
@@ -150,13 +153,78 @@ sce_sub <- sce_trimmed %>%
          ExpIncG = Q25v2part2,
          RExpIncG = ExpIncG - ExpInfl,
          ExpCG = ExpSG - ExpInfl,
-         female = ) %>%
-  dplyr::select(basic_vars, )
+         age_cat = case_when(
+          Q32 <= 40 ~ "≤40",
+          Q32 >= 41 & Q32 <= 59 ~ "41–59",
+          Q32 >= 60 ~ "≥60",
+          TRUE ~ NA_character_
+        ),
+        age_cat = factor(age_cat, levels = c("≤40", "41–59", "≥60")),
+         married  = ifelse(Q38 == 1, 1,
+                      ifelse(Q38 == 2, 0, NA_real_)),
+        female   = ifelse(Q33 == 1, 1,
+                          ifelse(Q33 == 2, 0, NA_real_)),
+        hispanic = ifelse(Q34 == 1, 1,
+                          ifelse(Q34 == 2, 0, NA_real_)),
+        multiple_jobs = case_when(
+          is.na(Q11) ~ NA_real_,
+          Q11 > 1 ~ 1,
+          TRUE ~ 0
+        ),
+        # Count number of correct answers across the 5 numeracy questions
+        num_correct = (
+          (QNUM1 == 150) +
+          (QNUM2 == 242) +
+          (QNUM3 == 10)  +
+          (QNUM5 == 10)  +
+          (QNUM6 == 5)
+        ),
+        # Indicator for high numeracy: at least 4 correct
+        high_numeracy = ifelse(is.na(num_correct), NA_real_,
+                               ifelse(num_correct >= 4, 1, 0))
+      )
 
+# Control Variables: Het. Int. Rate
+#   Ownership of Primary Residence (Q43)
+#   Ownership of Other Homes (Q44)
+# 1. Generate categorical ownership variables
+sce_trimmed_ext <- sce_trimmed_ext %>%
+  dplyr::mutate(
+    # Q43 categorical: 0 if missing, 1 if ==1, 2 if ==2, 3 otherwise
+    Q43_cat = case_when(
+      is.na(Q43) ~ 0,
+      Q43 == 1   ~ 1,
+      Q43 == 2   ~ 2,
+      TRUE       ~ 3
+    ),
 
+    # Q44 binary: 1 if ==1, 0 if ==2
+    Q44_bin = case_when(
+      Q44 == 1 ~ 1,
+      Q44 == 2 ~ 0,
+      TRUE     ~ NA_real_
+    )
+  )
+# initialize a vector to store interaction variable names
+HetIntR <- c()
 
+# 2. Interact with demographic variables
+for (v in demos) {
+  newname <- paste0(v, "_x_Q43") # with Q43_cat
+  sce_trimmed_ext[[newname]] <- interaction(sce_trimmed_ext[[v]], sce_trimmed_ext$Q43_cat, drop = TRUE)
+  HetIntR <- c(HetIntR, newname)
+}
+for (v in demos) {
+  newname <- paste0(v, "_x_Q44") # with Q44_bin
+  sce_trimmed_ext[[newname]] <- interaction(sce_trimmed_ext[[v]], sce_trimmed_ext$Q44_bin, drop = TRUE)
+  HetIntR <- c(HetIntR, newname)
+}
+
+sce_sub <- sce_trimmed_ext %>%
+dplyr::select(all_of(basic_vars), all_of(demos), all_of(HetIntR))
 
 ```
+
 ```{r Table 3 Regressions}
 library(AER)
 library(sandwich)
