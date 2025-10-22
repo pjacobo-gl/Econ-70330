@@ -94,3 +94,71 @@ sce_trimmed <- sce_trim3
 
 ```
 
+```{r Regression tests}
+library(AER)
+library(sandwich)
+library(lmtest)
+
+### 1. BASE MODELS ------------------------------------------------------
+
+# Weighted OLS
+ols_base <- lm(ExpSG ~ ExpInfl + RExpIncG, data = sce_sub, weights = weight)
+ols_base_cl <- coeftest(ols_base, vcov = vcovCL(ols_base, cluster = ~ cluster))
+
+# Weighted IV (2SLS)
+iv_base <- ivreg(ExpSG ~ ExpInfl + RExpIncG | PointInfl + RExpIncG,
+                 data = sce_sub, weights = weight)
+iv_base_cl <- coeftest(iv_base, vcov = vcovCL(iv_base, cluster = ~ cluster))
+
+
+### 2. ADD DEMOGRAPHICS -------------------------------------------------
+
+ols_demos <- lm(reformulate(c("ExpInfl", "RExpIncG", demos), "ExpSG"),
+                data = sce_sub, weights = weight)
+ols_demos_cl <- coeftest(ols_demos, vcov = vcovCL(ols_demos, cluster = ~ cluster))
+
+iv_demos <- ivreg(reformulate(c("ExpInfl", "RExpIncG", demos),
+                              response = "ExpSG",
+                              intercept = TRUE),
+                  instruments = reformulate(c("PointInfl", "RExpIncG", demos)),
+                  data = sce_sub, weights = weight)
+iv_demos_cl <- coeftest(iv_demos, vcov = vcovCL(iv_demos, cluster = ~ cluster))
+
+
+### 3. ADD DEMOS + HET INTERACTIONS ------------------------------------
+
+ols_full <- lm(reformulate(c("ExpInfl", "RExpIncG", demos, HetIntR), "ExpSG"),
+                data = sce_sub, weights = weight)
+ols_full_cl <- coeftest(ols_full, vcov = vcovCL(ols_full, cluster = ~ cluster))
+
+iv_full <- ivreg(reformulate(c("ExpInfl", "RExpIncG", demos, HetIntR),
+                              response = "ExpSG",
+                              intercept = TRUE),
+                  instruments = reformulate(c("PointInfl", "RExpIncG", demos, HetIntR)),
+                  data = sce_sub, weights = weight)
+iv_full_cl <- coeftest(iv_full, vcov = vcovCL(iv_full, cluster = ~ cluster))
+
+
+
+### 4. DISPLAY RESULTS --------------------------------------------------
+
+cat("\nOLS (Base)\n");       print(ols_base_cl)
+cat("Observations:", nobs(ols_base), "\n\n")
+
+cat("IV (Base)\n");          print(iv_base_cl)
+cat("Observations:", nobs(iv_base), "\n\n")
+
+cat("OLS (+ Demos)\n");      print(ols_demos_cl)
+cat("Observations:", nobs(ols_demos), "\n\n")
+
+cat("IV (+ Demos)\n");       print(iv_demos_cl)
+cat("Observations:", nobs(iv_demos), "\n\n")
+
+cat("OLS (+ Demos + HetIntR)\n"); print(ols_full_cl)
+cat("Observations:", nobs(ols_full), "\n\n")
+
+cat("IV (+ Demos + HetIntR)\n");  print(iv_full_cl)
+cat("Observations:", nobs(iv_full), "\n")
+
+```
+
