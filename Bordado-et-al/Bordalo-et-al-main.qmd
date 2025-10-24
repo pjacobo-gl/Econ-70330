@@ -1,0 +1,105 @@
+---
+title: "Bordalo-et-al-main"
+format: html
+editor: visual
+---
+
+
+```{r setup, echo=FALSE, warning=FALSE}
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330")
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+```
+
+```{r Data import and cleaning, echo=FALSE, warning=FALSE}
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330")
+
+# Nominal GDP
+NGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "NGDP")
+NGDP_actual <- read_excel("Data/NGDP.xlsx")
+NGDP_first_release <- read_excel("Data/NGDP_first_release.xlsx", sheet = "DATA", skip = 4)
+# Let's use levels for now
+# Select relevant time range
+NGDP <- NGDP %>%
+  filter(
+    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
+    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
+  )
+NGDP_actual <- NGDP_actual %>%
+  # Separate "YYYY:Q#" into two new columns
+  separate(col = 1, into = c("YEAR", "QUARTER"), sep = ":Q", convert = TRUE) %>%
+  # Filter for 1968:Q4 – 2016:Q4
+  filter(
+    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
+    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
+  )
+NGDP_first_release <- NGDP_first_release %>%
+  # Separate "YYYY:Q#" into two new columns
+  separate(col = 1, into = c("YEAR", "QUARTER"), sep = ":Q", convert = TRUE) %>%
+  # Filter for 1968:Q4 – 2016:Q4
+  filter(
+    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
+    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
+  ) %>%
+  dplyr::select(First)
+
+# Compute actuals
+growth_cols <- grep("^NOUTPUT", names(NGDP_actual), value = TRUE)
+NGDP_actual <- NGDP_actual %>%
+  # Ensure all NOUTPUT columns are numeric (convert if needed)
+  mutate(across(all_of(growth_cols), ~ suppressWarnings(as.numeric(.x)))) %>%
+  # For each row, get the first nonmissing value among NOUTPUT columns
+  rowwise() %>%
+  mutate(actual = {
+    vals <- c_across(all_of(growth_cols))
+    first_val <- vals[!is.na(vals)][1]
+    ifelse(length(first_val) == 0, NA_real_, first_val)
+  }) %>%
+  ungroup()
+
+RGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RGDP")
+RGDP_actual <- read_excel("Data/RGDP.xlsx")
+
+PGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "PGDP")
+PGDP_actual <- read_excel("Data/PGDP.xlsx")
+
+CPI <- read_excel("Data/SPFmicrodata.xlsx", sheet = "CPI")
+CPI_actual <- read_excel("Data/CPI.xlsx")
+
+RCONSUM <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RCONSUM")
+RCONSUM_actual <- read_excel("Data/RCONSUM.xlsx")
+
+INDPROD <- read_excel("Data/SPFmicrodata.xlsx", sheet = "INDPROD")
+INDPROD_actual <- read_excel("Data/INDPROD.xlsx")
+
+RNRESIN <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RNRESIN")
+RNRESIN_actual <- read_excel("Data/RNRESIN.xlsx")
+
+RRESINV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RRESINV")
+RRESINV_actual <- read_excel("Data/RRESINV.xlsx")
+
+RFEDGOV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RFEDGOV")
+RFEDGOV_actual <- read_excel("Data/RFEDGOV.xlsx")
+
+RSLGOV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RSLGOV")
+RSLGOV_actual <- read_excel("Data/RSLGOV.xlsx")
+
+HOUSING <- read_excel("Data/SPFmicrodata.xlsx", sheet = "HOUSING")
+HOUSING_actual <- read_excel("Data/HOUSING.xlsx") # MONTHLY
+
+UNEMP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "UNEMP")
+UNEMP_actual <- read_excel("Data/UNEMP.xlsx")
+
+TBILL <- read_excel("Data/SPFmicrodata.xlsx", sheet = "TBILL") # Three-month
+TBILL_actual <- read_excel("Data/TBILL.xlsx", sheet = "Quarterly")
+
+TBOND <- read_excel("Data/SPFmicrodata.xlsx", sheet = "TBOND") # 10-year
+TBOND_actual <- read_excel("Data/TBOND.xlsx", sheet = "Quarterly")
+
+BOND <- read_excel("Data/SPFmicrodata.xlsx", sheet = "BOND")
+BOND_actual <- read_excel("Data/BOND.xlsx", sheet = "Quarterly")
+
+```
+
