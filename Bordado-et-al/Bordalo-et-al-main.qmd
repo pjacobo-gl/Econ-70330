@@ -10,17 +10,17 @@ setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field cours
 library(readxl)
 library(dplyr)
 library(tidyr)
+library(purrr)
 
 ```
 
-```{r Data import and cleaning, echo=FALSE, warning=FALSE}
+```{r Nominal GDP, echo=FALSE, warning=FALSE}
 setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330")
 
-# Nominal GDP
-NGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "NGDP")
+# Import Data
+NGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "NGDP") # Forecasts
 NGDP_actual <- read_excel("Data/NGDP.xlsx")
-NGDP_first_release <- read_excel("Data/NGDP_first_release.xlsx", sheet = "DATA", skip = 4)
-# Let's use levels for now
+
 # Select relevant time range
 NGDP <- NGDP %>%
   filter(
@@ -35,71 +35,379 @@ NGDP_actual <- NGDP_actual %>%
     (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
     (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
   )
-NGDP_first_release <- NGDP_first_release %>%
-  # Separate "YYYY:Q#" into two new columns
-  separate(col = 1, into = c("YEAR", "QUARTER"), sep = ":Q", convert = TRUE) %>%
-  # Filter for 1968:Q4 – 2016:Q4
-  filter(
-    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
-    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
-  ) %>%
-  dplyr::select(First)
 
-# Compute actuals
-growth_cols <- grep("^NOUTPUT", names(NGDP_actual), value = TRUE)
+# Winsorize extreme forecasts: more than 5×IQR from median in a given quarter & horizon
+NGDP_long <- NGDP %>%
+  pivot_longer(cols = all_of(ngdp_cols),
+               names_to = "horizon",
+               values_to = "forecast_level") %>%
+  mutate(forecast_level = suppressWarnings(as.numeric(forecast_level)))
+NGDP_long_trimmed <- NGDP_long %>%
+  group_by(YEAR, QUARTER, horizon) %>%
+  mutate(
+    med = median(forecast_level, na.rm = TRUE),
+    iqr = IQR(forecast_level, na.rm = TRUE),
+    lower = med - 5 * iqr,
+    upper = med + 5 * iqr
+  ) %>%
+  filter(is.na(forecast_level) | (forecast_level >= lower & forecast_level <= upper)) %>%
+  ungroup() %>%
+  select(-med, -iqr, -lower, -upper)
+NGDP_trimmed <- NGDP_long_trimmed %>%
+  pivot_wider(names_from = horizon, values_from = forecast_level)
+
+# Keep only forecasters with ≥ 10 valid observations
+NGDP_trimmed <- NGDP_trimmed %>%
+  group_by(ID) %>%
+  mutate(n_obs = n()) %>%
+  ungroup() %>%
+  filter(n_obs >= 10) %>%
+  select(-n_obs)
+
+rm(NGDP_long_trimmed, NGDP_long)
+
+#--- Actuals ---#
+# 1. Identify NOUTPUT columns
+noutput_cols <- grep("^NOUTPUT", names(NGDP_actual), value = TRUE)
+
+# 2. Make sure all NOUTPUT columns are numeric
 NGDP_actual <- NGDP_actual %>%
-  # Ensure all NOUTPUT columns are numeric (convert if needed)
-  mutate(across(all_of(growth_cols), ~ suppressWarnings(as.numeric(.x)))) %>%
-  # For each row, get the first nonmissing value among NOUTPUT columns
+  mutate(across(all_of(noutput_cols),
+                ~ suppressWarnings(as.numeric(.x))))
+
+# 3. Find last non-missing NOUTPUT value per row (the most recent "first release")
+NGDP_actual <- NGDP_actual %>%
   rowwise() %>%
-  mutate(actual = {
-    vals <- c_across(all_of(growth_cols))
-    first_val <- vals[!is.na(vals)][1]
-    ifelse(length(first_val) == 0, NA_real_, first_val)
+  mutate(
+    # store NOUTPUT values for this row
+    .vals = list(c_across(all_of(noutput_cols))),
+    # indices of non-missing elements
+    .non_missing_idx = list(which(!is.na(unlist(.vals)))),
+    # last non-missing index
+    release_col_index = if (length(.non_missing_idx[[1]]) == 0) NA_integer_
+                        else tail(.non_missing_idx[[1]], 1),
+    # corresponding numeric value
+    release_value = if (is.na(release_col_index)) NA_real_
+                    else unlist(.vals)[release_col_index]
+  ) %>%
+  ungroup() %>%
+  select(-.vals, -.non_missing_idx)
+
+# 4. Compute 4-quarter (year-over-year) growth
+NGDP_actual <- NGDP_actual %>%
+  arrange(YEAR, QUARTER) %>%
+  mutate(
+    release_value_lag4 = dplyr::lag(release_value, 4),
+    actual_4q_growth = (release_value / release_value_lag4) - 1
+  )
+
+# 5. Keep rows with valid growth rates
+NGDP_actual_growth <- NGDP_actual %>%
+  filter(!is.na(actual_4q_growth)) %>%
+  select(YEAR, QUARTER, actual_4q_growth)
+
+#--- Forecasts ---#
+
+## "Consensus" forecasts ##
+
+ngdp_cols <- grep("^NGDP", names(NGDP), value = TRUE) # Identify forecast columns
+
+NGDP_avg <- NGDP %>% # Convert forecasts to numeric and average across respondents
+  mutate(across(all_of(ngdp_cols), ~ suppressWarnings(as.numeric(.x)))) %>%
+  group_by(YEAR, QUARTER) %>%
+  summarise(across(all_of(ngdp_cols), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  mutate(forecast = (NGDP5 / NGDP1) - 1)  %>% # Year-ahead forecast
+  arrange(YEAR, QUARTER) %>%
+  mutate(
+    # current forecast (already renamed 'forecast')
+    prev_forecast_same_target = dplyr::lag(NGDP6 / NGDP2 - 1, 1),
+    forecast_revision = forecast - prev_forecast_same_target
+  )
+
+# Merge actuals and forecasts by YEAR and QUARTER
+NGDP_merged <- NGDP_avg %>%
+  left_join(
+    NGDP_actual_growth %>% rename(actual = actual_4q_growth),
+    by = c("YEAR", "QUARTER")
+  )
+
+# Compute forecast error and keep only the needed variables scaled by 100
+NGDP_merged <- NGDP_merged %>%
+  mutate(forecast_error = actual - forecast) %>%
+  select(YEAR, QUARTER, forecast_revision, forecast_error) %>%
+  mutate(across(c(forecast_revision, forecast_error), ~ .x * 100))
+
+# CB regression
+library(sandwich)
+library(lmtest)
+
+cg_reg <- lm(forecast_error ~ forecast_revision, data = NGDP_merged)
+nw_vcov <- NeweyWest(cg_reg, prewhite = FALSE, adjust = TRUE) # Newey–West SEs with automatic bandwidth
+cg_results <- coeftest(cg_reg, vcov = nw_vcov)
+
+
+## Individual forecasts ##
+NGDP <- NGDP %>%
+  mutate(across(all_of(ngdp_cols), ~ suppressWarnings(as.numeric(.x))))
+
+# Compute forecast for each individual
+NGDP <- NGDP %>%
+  arrange(ID, YEAR, QUARTER) %>%
+  group_by(ID) %>%
+  mutate(
+    forecast = (NGDP5 / NGDP1) - 1,
+    prev_forecast_same_target = lag(NGDP6 / NGDP2 - 1, 1),
+    forecast_revision = forecast - prev_forecast_same_target
+  ) %>%
+  ungroup()
+
+# Merge with actual outcomes
+NGDP <- NGDP %>%
+  left_join(
+    NGDP_actual_growth %>% rename(actual = actual_4q_growth),
+    by = c("YEAR", "QUARTER")
+  ) %>%
+  mutate(
+    forecast_error = actual - forecast,
+    # Multiply by 100 for percentage points
+    across(c(forecast, forecast_revision, forecast_error, actual), ~ .x * 100)
+  )
+
+# CB regression
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+
+# Create a unique time cluster ID
+NGDP <- NGDP %>%
+  mutate(time_id = paste0(YEAR, "Q", QUARTER))
+
+# Run pooled OLS
+pool_reg <- lm(forecast_error ~ forecast_revision, data = NGDP)
+
+# Two-way clustered SEs (by ID and by time)
+cl_vcov <- cluster.vcov(pool_reg, NGDP[, c("ID", "time_id")])
+pool_results <- coeftest(pool_reg, vcov = cl_vcov)
+pool_results
+
+# Median of forecaster-by-forecaster regressions
+library(broom)
+beta_by_id <- NGDP %>%
+  group_by(ID) %>%
+  group_modify(~ {
+    # keep only rows with complete data
+    df <- drop_na(.x, forecast_error, forecast_revision)
+    
+    if (nrow(df) >= 2) {
+      mod <- lm(forecast_error ~ forecast_revision, data = df)
+      tibble(
+        beta0 = coef(mod)[1],
+        beta1 = coef(mod)[2],
+        n_obs = nobs(mod),
+        adj_r2 = summary(mod)$adj.r.squared
+      )
+    } else {
+      tibble(beta0 = NA_real_, beta1 = NA_real_, n_obs = nrow(df), adj_r2 = NA_real_)
+    }
+  }) %>%
+  ungroup()
+median_beta1 <- median(beta_by_id$beta1, na.rm = TRUE)
+median_beta1
+
+```
+
+```{r Other variables Data import and cleaning, echo=FALSE, warning=FALSE}
+RGDP <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RGDP")
+RGDP_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RGDP.xlsx")
+
+PGDP <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "PGDP")
+PGDP_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/PGDP.xlsx")
+
+CPI <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "CPI")
+CPI_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/CPI.xlsx")
+
+RCONSUM <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RCONSUM")
+RCONSUM_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RCONSUM.xlsx")
+
+INDPROD <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "INDPROD")
+INDPROD_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/INDPROD.xlsx")
+
+RNRESIN <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RNRESIN")
+RNRESIN_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RNRESIN.xlsx")
+
+RRESINV <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RRESINV")
+RRESINV_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RRESINV.xlsx")
+
+RFEDGOV <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RFEDGOV")
+RFEDGOV_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RFEDGOV.xlsx")
+
+RSLGOV <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "RSLGOV")
+RSLGOV_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/RSLGOV.xlsx")
+
+HOUSING <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "HOUSING")
+HOUSING_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/HOUSING.xlsx") # MONTHLY
+
+UNEMP <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "UNEMP")
+UNEMP_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/UNEMP.xlsx")
+
+TBILL <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "TBILL") # Three-month
+TBILL_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/TBILL.xlsx", sheet = "Quarterly")
+
+TBOND <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "TBOND") # 10-year
+TBOND_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/TBOND.xlsx", sheet = "Quarterly")
+
+BOND <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "BOND")
+BOND_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/BOND.xlsx", sheet = "Quarterly")
+
+```
+
+```{r BOND (Financial Variables)}
+#--- Actuals ---#
+
+# Import data
+BOND_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/BOND.xlsx", sheet = "Quarterly")
+
+# Convert observation_date to YEAR–QUARTER format and rename column
+library(dplyr)
+library(lubridate)
+
+BOND_actual <- BOND_actual %>%
+  mutate(
+    YEAR = year(observation_date),
+    QUARTER = quarter(observation_date)
+  ) %>%
+  select(YEAR, QUARTER, DAAA) %>%
+  rename(actual = DAAA)
+
+
+#--- Forecasts ---#
+# Import data
+BOND <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "BOND")
+
+# Select relevant time range
+BOND <- BOND %>%
+  filter((YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4)))
+
+# Identify NOUTPUT columns
+BOND_cols <- grep("^BOND", names(BOND), value = TRUE)
+
+# Winsorize extreme forecasts: more than 5×IQR from median in a given quarter & horizon
+BOND_long <- BOND %>%
+  pivot_longer(cols = all_of(BOND_cols),
+               names_to = "horizon",
+               values_to = "forecast_level") %>%
+  mutate(forecast_level = suppressWarnings(as.numeric(forecast_level)))
+BOND_long_trimmed <- BOND_long %>%
+  group_by(YEAR, QUARTER, horizon) %>%
+  mutate(
+    med = median(forecast_level, na.rm = TRUE),
+    iqr = IQR(forecast_level, na.rm = TRUE),
+    lower = med - 5 * iqr,
+    upper = med + 5 * iqr
+  ) %>%
+  filter(is.na(forecast_level) | (forecast_level >= lower & forecast_level <= upper)) %>%
+  ungroup() %>%
+  select(-med, -iqr, -lower, -upper)
+BOND_trimmed <- BOND_long_trimmed %>%
+  pivot_wider(names_from = horizon, values_from = forecast_level)
+
+# Keep only forecasters with ≥ 10 valid observations
+BOND_trimmed <- BOND_trimmed %>%
+  group_by(ID) %>%
+  mutate(n_obs = n()) %>%
+  ungroup() %>%
+  filter(n_obs >= 10) %>%
+  select(-n_obs)
+
+rm(BOND_long_trimmed, BOND_long, BOND)
+
+
+#--- CB Regressions ---#
+BOND_indiv <- BOND_trimmed %>%
+  arrange(ID, YEAR, QUARTER) %>%
+  group_by(ID) %>%
+  mutate(
+    # Individual i's forecast of year-ahead nominal yield growth (if you're using ratios)
+    forecast = BOND5,
+
+    # Previous quarter's forecast for the same target period
+    prev_forecast_same_target = lag(BOND6, 1),
+
+    # Forecast revision
+    forecast_revision = forecast - prev_forecast_same_target
+  ) %>%
+  ungroup() %>%
+  # Join the actual yield data
+  left_join(BOND_actual, by = c("YEAR", "QUARTER")) %>%
+  # Compute the forecast error *after* the join
+  mutate(
+    forecast_error = actual - forecast
+  )
+
+
+BOND_consensus <- BOND_indiv %>%
+  group_by(YEAR, QUARTER) %>%
+  summarise(
+    forecast          = mean(forecast, na.rm = TRUE),
+    forecast_revision = mean(forecast_revision, na.rm = TRUE),
+    forecast_error    = mean(forecast_error, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(lmtest)
+library(sandwich)
+
+cg_consensus_reg <- lm(forecast_error ~ forecast_revision, data = BOND_consensus)
+
+cg_consensus_vcov <- NeweyWest(cg_consensus_reg, prewhite = FALSE, adjust = TRUE)
+cg_consensus_out  <- coeftest(cg_consensus_reg, vcov = cg_consensus_vcov)
+
+cg_consensus_out
+
+
+#--- Forecaster-by-forecaster regressions ---#
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+
+# Create a unique time cluster ID
+BOND_indiv <- BOND_indiv %>%
+  mutate(time_id = paste0(YEAR, "Q", QUARTER))
+
+# Run pooled OLS
+pool_reg <- lm(forecast_error ~ forecast_revision, data = BOND_indiv)
+
+# Two-way clustered SEs (by ID and by time)
+cl_vcov <- cluster.vcov(pool_reg, BOND_indiv[, c("ID", "time_id")])
+pool_results <- coeftest(pool_reg, vcov = cl_vcov)
+pool_results
+
+# median beta1 across forecasters
+library(broom)
+beta_by_id <- BOND_indiv %>%
+  group_by(ID) %>%
+  group_modify(~ {
+    df <- tidyr::drop_na(.x, forecast_error, forecast_revision)
+    if (nrow(df) >= 2) {
+      mod <- lm(forecast_error ~ forecast_revision, data = df)
+      tibble(
+        beta0   = coef(mod)[1],
+        beta1   = coef(mod)[2],
+        n_obs   = nobs(mod),
+        adj_r2  = summary(mod)$adj.r.squared
+      )
+    } else {
+      tibble(
+        beta0   = NA_real_,
+        beta1   = NA_real_,
+        n_obs   = nrow(df),
+        adj_r2  = NA_real_
+      )
+    }
   }) %>%
   ungroup()
 
-RGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RGDP")
-RGDP_actual <- read_excel("Data/RGDP.xlsx")
-
-PGDP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "PGDP")
-PGDP_actual <- read_excel("Data/PGDP.xlsx")
-
-CPI <- read_excel("Data/SPFmicrodata.xlsx", sheet = "CPI")
-CPI_actual <- read_excel("Data/CPI.xlsx")
-
-RCONSUM <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RCONSUM")
-RCONSUM_actual <- read_excel("Data/RCONSUM.xlsx")
-
-INDPROD <- read_excel("Data/SPFmicrodata.xlsx", sheet = "INDPROD")
-INDPROD_actual <- read_excel("Data/INDPROD.xlsx")
-
-RNRESIN <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RNRESIN")
-RNRESIN_actual <- read_excel("Data/RNRESIN.xlsx")
-
-RRESINV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RRESINV")
-RRESINV_actual <- read_excel("Data/RRESINV.xlsx")
-
-RFEDGOV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RFEDGOV")
-RFEDGOV_actual <- read_excel("Data/RFEDGOV.xlsx")
-
-RSLGOV <- read_excel("Data/SPFmicrodata.xlsx", sheet = "RSLGOV")
-RSLGOV_actual <- read_excel("Data/RSLGOV.xlsx")
-
-HOUSING <- read_excel("Data/SPFmicrodata.xlsx", sheet = "HOUSING")
-HOUSING_actual <- read_excel("Data/HOUSING.xlsx") # MONTHLY
-
-UNEMP <- read_excel("Data/SPFmicrodata.xlsx", sheet = "UNEMP")
-UNEMP_actual <- read_excel("Data/UNEMP.xlsx")
-
-TBILL <- read_excel("Data/SPFmicrodata.xlsx", sheet = "TBILL") # Three-month
-TBILL_actual <- read_excel("Data/TBILL.xlsx", sheet = "Quarterly")
-
-TBOND <- read_excel("Data/SPFmicrodata.xlsx", sheet = "TBOND") # 10-year
-TBOND_actual <- read_excel("Data/TBOND.xlsx", sheet = "Quarterly")
-
-BOND <- read_excel("Data/SPFmicrodata.xlsx", sheet = "BOND")
-BOND_actual <- read_excel("Data/BOND.xlsx", sheet = "Quarterly")
-
+median_beta1 <- median(beta_by_id$beta1, na.rm = TRUE)
+median_beta1
 ```
 

@@ -1,0 +1,210 @@
+---
+title: "tests"
+format: html
+editor: visual
+---
+
+```{r Data cleaning for Nominal GDP, echo=FALSE, warning=FALSE}
+#--- Forecasts ---# 
+
+# Import data
+NGDP <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "NGDP")
+
+# Select relevant time range
+NGDP <- NGDP %>%
+  filter(
+    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
+    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
+  )
+
+# Identify NOUTPUT columns
+ngdp_cols <- grep("^NGDP", names(NGDP), value = TRUE)
+
+# Winsorize extreme forecasts: more than 5×IQR from median in a given quarter & horizon
+NGDP_long <- NGDP %>%
+  pivot_longer(cols = all_of(ngdp_cols),
+               names_to = "horizon",
+               values_to = "forecast_level") %>%
+  mutate(forecast_level = suppressWarnings(as.numeric(forecast_level)))
+NGDP_long_trimmed <- NGDP_long %>%
+  group_by(YEAR, QUARTER, horizon) %>%
+  mutate(
+    med = median(forecast_level, na.rm = TRUE),
+    iqr = IQR(forecast_level, na.rm = TRUE),
+    lower = med - 5 * iqr,
+    upper = med + 5 * iqr
+  ) %>%
+  filter(is.na(forecast_level) | (forecast_level >= lower & forecast_level <= upper)) %>%
+  ungroup() %>%
+  select(-med, -iqr, -lower, -upper)
+NGDP_trimmed <- NGDP_long_trimmed %>%
+  pivot_wider(names_from = horizon, values_from = forecast_level)
+
+# Keep only forecasters with ≥ 10 valid observations
+NGDP_trimmed <- NGDP_trimmed %>%
+  group_by(ID) %>%
+  mutate(n_obs = n()) %>%
+  ungroup() %>%
+  filter(n_obs >= 10) %>%
+  select(-n_obs)
+
+rm(NGDP_long_trimmed, NGDP_long, NGDP)
+
+
+#--- Actuals ---#
+# Import Data
+NGDP_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/NGDP.xlsx")
+
+# Select relevant time range
+NGDP_actual <- NGDP_actual %>%
+  # Separate "YYYY:Q#" into two new columns
+  separate(col = 1, into = c("YEAR", "QUARTER"), sep = ":Q", convert = TRUE) %>%
+  # Filter for 1968:Q4 – 2016:Q4
+  filter(
+    (YEAR > 1968 | (YEAR == 1968 & QUARTER >= 4)) &
+    (YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4))
+  )
+
+# Identify NOUTPUT columns
+noutput_cols <- grep("^NOUTPUT", names(NGDP_actual), value = TRUE)
+
+# Make sure all NOUTPUT columns are numeric
+NGDP_actual <- NGDP_actual %>%
+  mutate(across(all_of(noutput_cols),
+                ~ suppressWarnings(as.numeric(.x))))
+
+# Find last non-missing NOUTPUT value per row (the most recent "first release")
+NGDP_actual <- NGDP_actual %>%
+  rowwise() %>%
+  mutate(
+    # store NOUTPUT values for this row
+    .vals = list(c_across(all_of(noutput_cols))),
+    # indices of non-missing elements
+    .non_missing_idx = list(which(!is.na(unlist(.vals)))),
+    # last non-missing index
+    release_col_index = if (length(.non_missing_idx[[1]]) == 0) NA_integer_
+                        else tail(.non_missing_idx[[1]], 1),
+    # corresponding numeric value
+    release_value = if (is.na(release_col_index)) NA_real_
+                    else unlist(.vals)[release_col_index]
+  ) %>%
+  ungroup() %>%
+  select(-.vals, -.non_missing_idx)
+
+# Compute 4-quarter (year-over-year) growth
+NGDP_actual <- NGDP_actual %>%
+  arrange(YEAR, QUARTER) %>%
+  mutate(
+    release_value_lag4 = dplyr::lag(release_value, 4),
+    actual_4q_growth = (release_value / release_value_lag4) - 1
+  )
+
+# Keep rows with valid growth rates
+NGDP_actual_growth <- NGDP_actual %>%
+  filter(!is.na(actual_4q_growth)) %>%
+  select(YEAR, QUARTER, actual_4q_growth)
+
+rm(NGDP_actual)
+```
+
+
+```{r Redoing consensus forecast regressions for NGDP}
+NGDP_indiv <- NGDP_trimmed %>%
+  arrange(ID, YEAR, QUARTER) %>%
+  group_by(ID) %>%
+  mutate(
+    # individual i's forecast of year-ahead nominal GDP growth
+    forecast = (NGDP5 / NGDP1) - 1,
+
+    # previous quarter's forecast for that same target period
+    prev_forecast_same_target = lag(NGDP6 / NGDP2 - 1, 1),
+
+    # individual's forecast revision
+    forecast_revision = forecast - prev_forecast_same_target
+  ) %>%
+  ungroup() %>%
+  # merge the actual 4q growth for that period (same for all forecasters)
+  left_join(
+    NGDP_actual_growth %>%
+      rename(actual = actual_4q_growth),
+    by = c("YEAR", "QUARTER")
+  ) %>%
+  mutate(
+    forecast_error = actual - forecast
+  )
+
+NGDP_consensus <- NGDP_indiv %>%
+  group_by(YEAR, QUARTER) %>%
+  summarise(
+    forecast          = mean(forecast, na.rm = TRUE),
+    forecast_revision = mean(forecast_revision, na.rm = TRUE),
+    forecast_error    = mean(forecast_error, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # multiply by 100 to get percentage points
+  mutate(
+    forecast          = forecast * 100,
+    forecast_revision = forecast_revision * 100,
+    forecast_error    = forecast_error * 100
+  )
+
+library(lmtest)
+library(sandwich)
+
+cg_consensus_reg <- lm(forecast_error ~ forecast_revision, data = NGDP_consensus)
+
+cg_consensus_vcov <- NeweyWest(cg_consensus_reg, prewhite = FALSE, adjust = TRUE)
+cg_consensus_out  <- coeftest(cg_consensus_reg, vcov = cg_consensus_vcov)
+
+cg_consensus_out
+
+
+#--- Forecaster-by-forecaster regressions ---#
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+
+# Create a unique time cluster ID
+NGDP_indiv <- NGDP_indiv %>%
+  mutate(time_id = paste0(YEAR, "Q", QUARTER))
+
+# Run pooled OLS
+pool_reg <- lm(forecast_error ~ forecast_revision, data = NGDP_indiv)
+
+# Two-way clustered SEs (by ID and by time)
+cl_vcov <- cluster.vcov(pool_reg, NGDP_indiv[, c("ID", "time_id")])
+pool_results <- coeftest(pool_reg, vcov = cl_vcov)
+pool_results
+
+# median beta1 across forecasters
+library(broom)
+beta_by_id <- NGDP_indiv %>%
+  group_by(ID) %>%
+  group_modify(~ {
+    df <- tidyr::drop_na(.x, forecast_error, forecast_revision)
+    if (nrow(df) >= 2) {
+      mod <- lm(forecast_error ~ forecast_revision, data = df)
+      tibble(
+        beta0   = coef(mod)[1],
+        beta1   = coef(mod)[2],
+        n_obs   = nobs(mod),
+        adj_r2  = summary(mod)$adj.r.squared
+      )
+    } else {
+      tibble(
+        beta0   = NA_real_,
+        beta1   = NA_real_,
+        n_obs   = nrow(df),
+        adj_r2  = NA_real_
+      )
+    }
+  }) %>%
+  ungroup()
+
+median_beta1 <- median(beta_by_id$beta1, na.rm = TRUE)
+median_beta1
+
+
+```
+
+
