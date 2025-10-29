@@ -1,0 +1,95 @@
+---
+title: "Coibion-Gorodnichenko-main"
+format: html
+editor: visual
+---
+
+```{r Setup, echo=FALSE, warning=FALSE}
+# IMPORTANT: Set to your working directory and install packages if necessary
+
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Coibion-Gorodnichenko")
+library(readxl) # For importing xlsx files
+library(dplyr) # For data manipulation
+library(haven) # For .dta importing
+library(fixest) # For fixed effects
+library(modelsummary) # For formatting models into tables
+
+```
+
+```{r Data import and cleaning}
+# Macro and forecast data from the authors
+macro_data <- read_dta("Data/Macro-data---FRED.dta")
+forecast_data <- read_dta("Data/us_data_updated.dta")
+
+forecast_data <- forecast_data %>% 
+  filter(forecsource=="spf" & forvar=="pi") %>%
+  select(timeseq,year,quarter,fehor,ind_fe,ind_fr,ind_for) %>%
+  pivot_wider(id_cols = c(timeseq,year,quarter), 
+              names_from =fehor, values_from = c(ind_fe,ind_fr,ind_for))%>%
+  arrange(timeseq) %>%
+  mutate(ind_for_30=((ind_for_0/400+1)*(ind_for_1/400+1)*(ind_for_2/400+1)*(ind_for_3/400+1)-1)*100,
+  ind_for_41=((ind_for_1/400+1)*(ind_for_2/400+1)*(ind_for_3/400+1)*(ind_for_4/400+1)-1)*100,
+  ind_fe_30=((ind_fe_0/400+1)*(ind_fe_1/400+1)*(ind_fe_2/400+1)*(ind_fe_3/400+1)-1)*100) %>%
+  mutate(fr_30_41=ind_for_30- lag(ind_for_41))
+
+CB <- forecast_data %>% 
+  left_join(macro_data, by=c("year","quarter")) %>% # Join with the macro data
+  mutate(timeseq=timeseq.x)%>%
+  select(-timeseq.x,-timeseq.y) %>%
+  mutate(L_inf=lag(inflation_realtime),
+         L_tb3ms=lag(tb3ms),
+         L_unrate=lag(unrate),
+         oilP=oilprice) %>%
+  mutate(oilP=if_else(is.na(oilP),mcoilwtico, oilP))%>%
+  mutate(LD_oilP=log(lag(oilP)/lag(oilP,n=2)),
+         L_inf4=ind_for_30)
+
+```
+
+```{r Regressions and Table formatting}
+# Acknowledgements to Abraham Assefa for showing me the modelsummary package
+
+#--- Panel A ---#
+m1 <- feols(ind_fe_30 ~ L_inf4, CB,
+                        NW(5) ~ timeseq) # Column 1
+m2 <- feols(ind_fe_30 ~ L_inf4 + L_inf, CB,
+                            NW(5) ~ timeseq) # Column 2
+m3 <- feols(ind_fe_30 ~ L_inf4 + L_tb3ms, CB,
+                            NW(5) ~ timeseq) # Column 3
+m4 <- feols(ind_fe_30 ~ L_inf4 + LD_oilP, CB,
+                            NW(5) ~ timeseq) # Column 4
+m5 <- feols(ind_fe_30 ~ L_inf4 + L_unrate, CB,
+                            NW(5) ~ timeseq) # Column 5
+
+# Formatting
+panelA <- list(m1, m2, m3, m4, m5)
+modelsummary(panelA,
+             coef_rename = c("L_inf4" = "1 Year Ahead Inflation forecast", 
+                             "L_inf" = "Lagged Inflation",
+                             "L_tb3ms" = "Average quarterly 3-month Tbill rate",
+                             "LD_oilP" ="Quarterly change in the log of the oil price",
+                             "L_unrate"=  "Average unemployment rate"))
+
+#--- Panel B ---#
+m1B <- feols(ind_fe_30 ~ fr_30_41, CB,
+                            NW(5) ~ timeseq) # Column 1
+m2B <- feols(ind_fe_30 ~ fr_30_41 + L_inf, CB,
+                            NW(5) ~ timeseq) # Column 2
+m3B <- feols(ind_fe_30 ~ fr_30_41 + L_tb3ms, CB,
+                            NW(5) ~ timeseq) # Column 3
+m4B <- feols(ind_fe_30 ~ fr_30_41 + LD_oilP, CB,
+                            NW(5) ~ timeseq) # Column 4
+m5B <- feols(ind_fe_30 ~ fr_30_41 + L_unrate, CB,
+                            NW(5) ~ timeseq) # Column 5
+
+# Formatting
+panelB <- list(m1B, m2B, m3B, m4B, m5B)
+modelsummary(panelB,
+             coef_rename = c("fr_30_41" = "Forecast Revision(t-1 to t)", 
+                             "L_inf" = "Lagged Inflation",
+                             "L_tb3ms" = "Average quarterly 3-month Tbill rate",
+                             "LD_oilP" ="Quarterly change in the log of the oil price",
+                             "L_unrate"=  "Average unemployment rate"))
+
+```
+

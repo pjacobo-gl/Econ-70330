@@ -261,7 +261,309 @@ BOND_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Co
 
 ```
 
-```{r BOND (Financial Variables)}
+```{r TBOND, echo=FALSE, warning=FALSE}
+#--- Actuals ---#
+
+# Import data
+TBOND_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/TBOND.xlsx", sheet = "Quarterly")
+
+# Convert observation_date to YEAR–QUARTER format and rename column
+library(dplyr)
+library(lubridate)
+
+TBOND_actual <- TBOND_actual %>%
+  mutate(
+    YEAR = year(observation_date),
+    QUARTER = quarter(observation_date)
+  ) %>%
+  select(YEAR, QUARTER, DGS10) %>%
+  rename(actual = DGS10)
+
+
+#--- Forecasts ---#
+# Import data
+TBOND <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "TBOND")
+
+# Select relevant time range
+TBOND <- TBOND %>%
+  filter((YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4)))
+
+# Identify NOUTPUT columns
+TBOND_cols <- grep("^TBOND", names(TBOND), value = TRUE)
+
+# Winsorize extreme forecasts: more than 5×IQR from median in a given quarter & horizon
+TBOND_long <- TBOND %>%
+  pivot_longer(cols = all_of(TBOND_cols),
+               names_to = "horizon",
+               values_to = "forecast_level") %>%
+  mutate(forecast_level = suppressWarnings(as.numeric(forecast_level)))
+TBOND_long_trimmed <- TBOND_long %>%
+  group_by(YEAR, QUARTER, horizon) %>%
+  mutate(
+    med = median(forecast_level, na.rm = TRUE),
+    iqr = IQR(forecast_level, na.rm = TRUE),
+    lower = med - 5 * iqr,
+    upper = med + 5 * iqr
+  ) %>%
+  filter(is.na(forecast_level) | (forecast_level >= lower & forecast_level <= upper)) %>%
+  ungroup() %>%
+  select(-med, -iqr, -lower, -upper)
+TBOND_trimmed <- TBOND_long_trimmed %>%
+  pivot_wider(names_from = horizon, values_from = forecast_level)
+
+# Keep only forecasters with ≥ 10 valid observations
+TBOND_trimmed <- TBOND_trimmed %>%
+  group_by(ID) %>%
+  mutate(n_obs = n()) %>%
+  ungroup() %>%
+  filter(n_obs >= 10) %>%
+  select(-n_obs)
+
+rm(TBOND_long_trimmed, TBOND_long, TBOND)
+
+
+#--- CB Regressions ---#
+TBOND_indiv <- TBOND_trimmed %>%
+  arrange(ID, YEAR, QUARTER) %>%
+  group_by(ID) %>%
+  mutate(
+    # Individual i's forecast of year-ahead nominal yield growth (if you're using ratios)
+    forecast = TBOND5,
+
+    # Previous quarter's forecast for the same target period
+    prev_forecast_same_target = lag(TBOND6, 1),
+
+    # Forecast revision
+    forecast_revision = forecast - prev_forecast_same_target
+  ) %>%
+  ungroup() %>%
+  # Join the actual yield data
+  left_join(TBOND_actual, by = c("YEAR", "QUARTER")) %>%
+  # Compute the forecast error *after* the join
+  mutate(
+    forecast_error = actual - forecast
+  )
+
+
+TBOND_consensus <- TBOND_indiv %>%
+  group_by(YEAR, QUARTER) %>%
+  summarise(
+    forecast          = mean(forecast, na.rm = TRUE),
+    forecast_revision = mean(forecast_revision, na.rm = TRUE),
+    forecast_error    = mean(forecast_error, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(lmtest)
+library(sandwich)
+
+cg_consensus_reg <- lm(forecast_error ~ forecast_revision, data = TBOND_consensus)
+
+cg_consensus_vcov <- NeweyWest(cg_consensus_reg, prewhite = FALSE, adjust = TRUE)
+cg_consensus_out  <- coeftest(cg_consensus_reg, vcov = cg_consensus_vcov)
+
+cg_consensus_out
+
+
+#--- Forecaster-by-forecaster regressions ---#
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+
+# Create a unique time cluster ID
+TBOND_indiv <- TBOND_indiv %>%
+  mutate(time_id = paste0(YEAR, "Q", QUARTER))
+
+# Run pooled OLS
+pool_reg <- lm(forecast_error ~ forecast_revision, data = TBOND_indiv)
+
+# Two-way clustered SEs (by ID and by time)
+cl_vcov <- cluster.vcov(pool_reg, TBOND_indiv[, c("ID", "time_id")])
+pool_results <- coeftest(pool_reg, vcov = cl_vcov)
+pool_results
+
+# median beta1 across forecasters
+library(broom)
+beta_by_id <- TBOND_indiv %>%
+  group_by(ID) %>%
+  group_modify(~ {
+    df <- tidyr::drop_na(.x, forecast_error, forecast_revision)
+    if (nrow(df) >= 2) {
+      mod <- lm(forecast_error ~ forecast_revision, data = df)
+      tibble(
+        beta0   = coef(mod)[1],
+        beta1   = coef(mod)[2],
+        n_obs   = nobs(mod),
+        adj_r2  = summary(mod)$adj.r.squared
+      )
+    } else {
+      tibble(
+        beta0   = NA_real_,
+        beta1   = NA_real_,
+        n_obs   = nrow(df),
+        adj_r2  = NA_real_
+      )
+    }
+  }) %>%
+  ungroup()
+
+median_beta1 <- median(beta_by_id$beta1, na.rm = TRUE)
+median_beta1
+```
+
+```{r TBILL, warning=FALSE}
+#--- Actuals ---#
+
+# Import data
+TBILL_actual <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/TBILL.xlsx", sheet = "Quarterly")
+
+# Convert observation_date to YEAR–QUARTER format and rename column
+library(dplyr)
+library(lubridate)
+
+TBILL_actual <- TBILL_actual %>%
+  mutate(
+    YEAR = year(observation_date),
+    QUARTER = quarter(observation_date)
+  ) %>%
+  select(YEAR, QUARTER, DGS3MO) %>%
+  rename(actual = DGS3MO)
+
+
+#--- Forecasts ---#
+# Import data
+TBILL <- read_excel("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Data/SPFmicrodata.xlsx", sheet = "TBILL")
+
+# Select relevant time range
+TBILL <- TBILL %>%
+  filter((YEAR < 2016 | (YEAR == 2016 & QUARTER <= 4)))
+
+# Identify NOUTPUT columns
+TBILL_cols <- grep("^TBILL", names(TBILL), value = TRUE)
+
+# Winsorize extreme forecasts: more than 5×IQR from median in a given quarter & horizon
+TBILL_long <- TBILL %>%
+  pivot_longer(cols = all_of(TBILL_cols),
+               names_to = "horizon",
+               values_to = "forecast_level") %>%
+  mutate(forecast_level = suppressWarnings(as.numeric(forecast_level)))
+TBILL_long_trimmed <- TBILL_long %>%
+  group_by(YEAR, QUARTER, horizon) %>%
+  mutate(
+    med = median(forecast_level, na.rm = TRUE),
+    iqr = IQR(forecast_level, na.rm = TRUE),
+    lower = med - 5 * iqr,
+    upper = med + 5 * iqr
+  ) %>%
+  filter(is.na(forecast_level) | (forecast_level >= lower & forecast_level <= upper)) %>%
+  ungroup() %>%
+  select(-med, -iqr, -lower, -upper)
+TBILL_trimmed <- TBILL_long_trimmed %>%
+  pivot_wider(names_from = horizon, values_from = forecast_level)
+
+# Keep only forecasters with ≥ 10 valid observations
+TBILL_trimmed <- TBILL_trimmed %>%
+  group_by(ID) %>%
+  mutate(n_obs = n()) %>%
+  ungroup() %>%
+  filter(n_obs >= 10) %>%
+  select(-n_obs)
+
+rm(TBILL_long_trimmed, TBILL_long, TBILL)
+
+
+#--- CB Regressions ---#
+TBILL_indiv <- TBILL_trimmed %>%
+  arrange(ID, YEAR, QUARTER) %>%
+  group_by(ID) %>%
+  mutate(
+    # Individual i's forecast of year-ahead nominal yield growth (if you're using ratios)
+    forecast = TBILL5,
+
+    # Previous quarter's forecast for the same target period
+    prev_forecast_same_target = lag(TBILL6, 1),
+
+    # Forecast revision
+    forecast_revision = forecast - prev_forecast_same_target
+  ) %>%
+  ungroup() %>%
+  # Join the actual yield data
+  left_join(TBILL_actual, by = c("YEAR", "QUARTER")) %>%
+  # Compute the forecast error *after* the join
+  mutate(
+    forecast_error = actual - forecast
+  )
+
+
+TBILL_consensus <- TBILL_indiv %>%
+  group_by(YEAR, QUARTER) %>%
+  summarise(
+    forecast          = mean(forecast, na.rm = TRUE),
+    forecast_revision = mean(forecast_revision, na.rm = TRUE),
+    forecast_error    = mean(forecast_error, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(lmtest)
+library(sandwich)
+
+cg_consensus_reg <- lm(forecast_error ~ forecast_revision, data = TBILL_consensus)
+
+cg_consensus_vcov <- NeweyWest(cg_consensus_reg, prewhite = FALSE, adjust = TRUE)
+cg_consensus_out  <- coeftest(cg_consensus_reg, vcov = cg_consensus_vcov)
+
+cg_consensus_out
+
+
+#--- Forecaster-by-forecaster regressions ---#
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+
+# Create a unique time cluster ID
+TBILL_indiv <- TBILL_indiv %>%
+  mutate(time_id = paste0(YEAR, "Q", QUARTER))
+
+# Run pooled OLS
+pool_reg <- lm(forecast_error ~ forecast_revision, data = TBILL_indiv)
+
+# Two-way clustered SEs (by ID and by time)
+cl_vcov <- cluster.vcov(pool_reg, TBILL_indiv[, c("ID", "time_id")])
+pool_results <- coeftest(pool_reg, vcov = cl_vcov)
+pool_results
+
+# median beta1 across forecasters
+library(broom)
+beta_by_id <- TBILL_indiv %>%
+  group_by(ID) %>%
+  group_modify(~ {
+    df <- tidyr::drop_na(.x, forecast_error, forecast_revision)
+    if (nrow(df) >= 2) {
+      mod <- lm(forecast_error ~ forecast_revision, data = df)
+      tibble(
+        beta0   = coef(mod)[1],
+        beta1   = coef(mod)[2],
+        n_obs   = nobs(mod),
+        adj_r2  = summary(mod)$adj.r.squared
+      )
+    } else {
+      tibble(
+        beta0   = NA_real_,
+        beta1   = NA_real_,
+        n_obs   = nrow(df),
+        adj_r2  = NA_real_
+      )
+    }
+  }) %>%
+  ungroup()
+
+median_beta1 <- median(beta_by_id$beta1, na.rm = TRUE)
+median_beta1
+```
+
+
+
+```{r BOND, echo=FALSE, warning=FALSE}
 #--- Actuals ---#
 
 # Import data
