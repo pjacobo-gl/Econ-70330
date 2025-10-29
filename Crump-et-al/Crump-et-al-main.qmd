@@ -5,7 +5,7 @@ date: "2025-10-21"
 ---
 
 ```{r setup, echo=FALSE, warning=FALSE}
-setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330")
+setwd("/Users/jacobogomezlandero/Documents/Notre Dame PhD/Coursework/Field courses/Expectations/Replications/Econ-70330/Crump-et-al")
 library(readxl)
 library(dplyr)
 
@@ -225,24 +225,74 @@ dplyr::select(all_of(basic_vars), all_of(demos), all_of(HetIntR))
 
 ```
 
-```{r Table 3 Regressions}
+```{r Table 3 Regressions, warning=FALSE}
 library(AER)
 library(sandwich)
 library(lmtest)
 
-# Weighted OLS
-ols_wt <- lm(ExpSG ~ ExpInfl + RExpIncG, data = sce_sub, weights = weight)
-ols_cl  <- coeftest(ols_wt, vcov = vcovCL(ols_wt, cluster = ~ cluster))
+# Helper function for 2SLS with many controls
+iv_with_controls <- function(dep, endog_rhs, instr_rhs, data, wts = NULL) {
+  f_main  <- reformulate(endog_rhs, response = dep)
+  f_instr <- reformulate(instr_rhs)
 
-# Weighted IV (2SLS)
-iv_wt <- ivreg(ExpSG ~ ExpInfl + RExpIncG | PointInfl + RExpIncG, 
+  f_main_str  <- paste(deparse(f_main),  collapse = " ")
+  f_instr_str <- paste(deparse(f_instr), collapse = " ")
+  f_instr_str <- sub("^~\\s*", "", f_instr_str)
+
+  iv_formula  <- as.formula(paste(f_main_str, "|", f_instr_str))
+
+  ivreg(iv_formula, data = data, weights = data$weight)
+}
+
+#--- Column 1
+m1 <- lm(ExpSG ~ ExpInfl + RExpIncG, data = sce_sub, weights = weight)
+
+#--- Column 2
+m2 <- lm(
+  reformulate(
+    c("ExpInfl", "RExpIncG", demos),  # all RHS variable names
+    response = "ExpSG"                # LHS variable
+  ),
+  data = sce_sub,
+  weights = weight
+)
+
+#--- Column 3
+m3 <- lm(
+  reformulate(
+    c("ExpInfl", "RExpIncG", demos, HetIntR),  # all RHS variable names
+    response = "ExpSG"                # LHS variable
+  ),
+  data = sce_sub,
+  weights = weight
+)
+
+#--- Column 4
+m4 <- ivreg(ExpSG ~ ExpInfl + RExpIncG | PointInfl + RExpIncG, 
                data = sce_sub, weights = weight)
-iv_cl <- coeftest(iv_wt, vcov = vcovCL(iv_wt, cluster = ~ cluster))
 
-# Display results
-ols_cl
-iv_cl
+#--- Column 5
+m5 <- iv_with_controls(
+  dep       = "ExpSG",
+  endog_rhs = c("ExpInfl", "RExpIncG", demos),
+  instr_rhs = c("PointInfl", "RExpIncG", demos),
+  data      = sce_sub,
+  wts       = weight
+)
 
+#--- Column 6
+m6 <- iv_with_controls(
+  dep       = "ExpSG",
+  endog_rhs = c("ExpInfl", "RExpIncG", c(demos, HetIntR)),
+  instr_rhs = c("PointInfl", "RExpIncG", c(demos, HetIntR)),
+  data      = sce_sub,
+  wts       = weight
+)
+
+
+#--- Formatting
+models <- list(m1, m2, m3, m4, m5, m6)
+modelsummary(models)
 
 
 ```
