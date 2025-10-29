@@ -1,7 +1,11 @@
-# Ignore all files in the data folder
-data/
+# R session and history files
+.RData
+.Rhistory
 
-# Ignore any dta files anywhere
-*.dta
+# macOS system files
+.DS_Store
 
-.Rproj.user
+# RStudio project settings
+.Rproj.user/
+
+main.qmd
